@@ -668,3 +668,144 @@ def get_poster_url(poster_path):
         f"{IMAGE_BASE_URL}"
         f"{poster_path}"
     )
+# =========================================================
+# MOVIE CREDITS
+# =========================================================
+
+def get_movie_credits(movie_id):
+    """
+    Get director, hero, heroine and top cast
+    information from TMDB.
+    """
+
+    if not movie_id:
+        return {
+            "director": "Not Available",
+            "hero": "Not Available",
+            "heroine": "Not Available",
+            "cast": [],
+        }
+
+    # Get credits from TMDB
+    endpoint = f"/movie/{movie_id}/credits"
+
+    # IMPORTANT:
+    # Use _request(), because this is the TMDB
+    # request function defined at the top of this file.
+    data = _request(
+        endpoint,
+        {
+            "language": "en-US"
+        }
+    )
+
+    if not data:
+        return {
+            "director": "Not Available",
+            "hero": "Not Available",
+            "heroine": "Not Available",
+            "cast": [],
+        }
+
+    crew = data.get("crew", []) or []
+    cast = data.get("cast", []) or []
+
+    # =====================================================
+    # DIRECTOR
+    # =====================================================
+
+    director = "Not Available"
+
+    for person in crew:
+
+        if person.get("job") == "Director":
+
+            director = person.get(
+                "name",
+                "Not Available"
+            )
+
+            break
+
+    # =====================================================
+    # TOP CAST
+    # =====================================================
+
+    top_cast = []
+
+    for person in cast[:10]:
+
+        top_cast.append(
+            {
+                "name": person.get(
+                    "name",
+                    "Unknown"
+                ),
+
+                "character": person.get(
+                    "character",
+                    ""
+                ),
+
+                "profile_path": person.get(
+                    "profile_path"
+                ),
+            }
+        )
+
+    # =====================================================
+    # HERO
+    # =====================================================
+
+    hero = "Not Available"
+
+    for person in cast:
+
+        # TMDB gender:
+        # 1 = Female
+        # 2 = Male
+
+        if person.get("gender") == 2:
+
+            hero = person.get(
+                "name",
+                "Not Available"
+            )
+
+            break
+
+    # Fallback
+    if hero == "Not Available" and cast:
+
+        hero = cast[0].get(
+            "name",
+            "Not Available"
+        )
+
+    # =====================================================
+    # HEROINE
+    # =====================================================
+
+    heroine = "Not Available"
+
+    for person in cast:
+
+        if person.get("gender") == 1:
+
+            heroine = person.get(
+                "name",
+                "Not Available"
+            )
+
+            break
+
+    # =====================================================
+    # RETURN ALL INFORMATION
+    # =====================================================
+
+    return {
+        "director": director,
+        "hero": hero,
+        "heroine": heroine,
+        "cast": top_cast,
+    }
