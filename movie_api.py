@@ -1,13 +1,13 @@
 import os
-from datetime import date, timedelta
+from datetime import date
 
 import requests
 from dotenv import load_dotenv
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# =========================================================
+# TMDB CONFIGURATION
+# =========================================================
 
 load_dotenv()
 
@@ -15,502 +15,656 @@ API_KEY = os.getenv("TMDB_API_KEY")
 
 BASE_URL = "https://api.themoviedb.org/3"
 
+IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
-# ============================================================
-# COMMON TMDB REQUEST
-# ============================================================
+REQUEST_TIMEOUT = 10
 
-def tmdb_get(endpoint, params=None):
+SESSION = requests.Session()
+
+
+# =========================================================
+# SUPPORTED LANGUAGES
+# =========================================================
+
+LANGUAGES = {
+    "Telugu": "te",
+    "Tamil": "ta",
+    "Kannada": "kn",
+    "Malayalam": "ml",
+    "Hindi": "hi",
+    "English": "en",
+}
+
+
+# =========================================================
+# COMMON TMDB REQUEST FUNCTION
+# =========================================================
+
+def _request(endpoint, params=None):
+    """
+    Safely send a request to TMDB.
+    """
 
     if not API_KEY:
-        print("ERROR: TMDB_API_KEY not found in .env")
-        return None
+        print("ERROR: TMDB_API_KEY not found.")
+        return {}
 
-    if params is None:
-        params = {}
+    url = f"{BASE_URL}{endpoint}"
 
-    params["api_key"] = API_KEY
+    request_params = {
+        "api_key": API_KEY
+    }
+
+    if params:
+        request_params.update(params)
 
     try:
 
-        response = requests.get(
-            f"{BASE_URL}{endpoint}",
-            params=params,
-            timeout=20
+        response = SESSION.get(
+            url,
+            params=request_params,
+            timeout=REQUEST_TIMEOUT
         )
 
-        if response.status_code != 200:
-
-            print(
-                "TMDB ERROR:",
-                response.status_code
-            )
-
-            return None
+        response.raise_for_status()
 
         return response.json()
 
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.Timeout:
 
-        print("TMDB CONNECTION ERROR:", e)
+        print(f"TMDB timeout: {endpoint}")
 
-        return None
+        return {}
+
+    except requests.exceptions.RequestException as error:
+
+        print(f"TMDB request error: {error}")
+
+        return {}
+
+    except ValueError:
+
+        print("TMDB returned invalid JSON.")
+
+        return {}
 
 
-# ============================================================
+# =========================================================
+# CLEAN MOVIE RESULTS
+# =========================================================
+
+def _clean_movies(movies):
+
+    cleaned = []
+
+    seen_ids = set()
+
+    for movie in movies or []:
+
+        movie_id = movie.get("id")
+
+        if not movie_id:
+            continue
+
+        if movie_id in seen_ids:
+            continue
+
+        title = (
+            movie.get("title")
+            or movie.get("original_title")
+            or ""
+        ).strip()
+
+        if not title:
+            continue
+
+        seen_ids.add(movie_id)
+
+        cleaned.append(movie)
+
+    return cleaned
+
+
+# =========================================================
+# LANGUAGE FILTER
+# =========================================================
+
+def _filter_language(movies, language_code):
+
+    return [
+        movie
+        for movie in _clean_movies(movies)
+        if movie.get("original_language") == language_code
+    ]
+
+
+# =========================================================
 # SEARCH MOVIES
-# ============================================================
+# =========================================================
 
 def search_movies(movie_name):
+    """
+    Search TMDB.
 
-    params = {
-        "query": movie_name,
-        "language": "en-US",
-        "include_adult": False,
-        "page": 1
-    }
+    Exact title matches are prioritized first.
+    Popular and relevant results follow.
+    """
 
-    data = tmdb_get(
-        "/search/movie",
-        params
-    )
-
-    if not data:
+    if not movie_name or not movie_name.strip():
         return []
 
-    return data.get(
-        "results",
-        []
+    query = movie_name.strip()
+
+    data = _request(
+        "/search/movie",
+        {
+            "query": query,
+            "language": "en-US",
+            "include_adult": False,
+            "page": 1
+        }
     )
 
+    results = _clean_movies(
+        data.get("results", [])
+    )
 
-# ============================================================
+    query_lower = query.casefold()
+
+    def score_movie(movie):
+
+        title = (
+            movie.get("title")
+            or movie.get("original_title")
+            or ""
+        ).casefold()
+
+        original_title = (
+            movie.get("original_title")
+            or ""
+        ).casefold()
+
+        # Exact title
+        if title == query_lower:
+
+            match_score = 1000000
+
+        # Exact original title
+        elif original_title == query_lower:
+
+            match_score = 900000
+
+        # Title starts with search
+        elif title.startswith(query_lower):
+
+            match_score = 500000
+
+        # Search term occurs in title
+        elif query_lower in title:
+
+            match_score = 250000
+
+        else:
+
+            match_score = 0
+
+        popularity = movie.get(
+            "popularity",
+            0
+        ) or 0
+
+        vote_count = movie.get(
+            "vote_count",
+            0
+        ) or 0
+
+        return (
+            match_score,
+            popularity,
+            vote_count
+        )
+
+    results.sort(
+        key=score_movie,
+        reverse=True
+    )
+
+    return results[:10]
+
+
+# =========================================================
 # MOVIE DETAILS
-# ============================================================
+# =========================================================
 
 def get_movie_details(movie_id):
+    """
+    Get complete movie information.
+    """
 
-    params = {
-        "language": "en-US"
-    }
+    if not movie_id:
+        return {}
 
-    return tmdb_get(
+    return _request(
         f"/movie/{movie_id}",
-        params
+        {
+            "language": "en-US"
+        }
     )
 
 
-# ============================================================
+# =========================================================
 # MOVIE REVIEWS
-# ============================================================
+# =========================================================
 
 def get_movie_reviews(movie_id):
+    """
+    Get real reviews from TMDB.
 
-    params = {
-        "language": "en-US",
-        "page": 1
-    }
+    First tries English reviews.
+    If none are available, tries the general review endpoint.
+    """
 
-    data = tmdb_get(
+    if not movie_id:
+        return []
+
+    # First request
+    data = _request(
         f"/movie/{movie_id}/reviews",
-        params
-    )
-
-    if not data:
-        return []
-
-    return data.get(
-        "results",
-        []
-    )
-
-
-# ============================================================
-# SIMILAR MOVIES
-# ============================================================
-
-def get_similar_movies(movie_id):
-
-    movie = get_movie_details(movie_id)
-
-    if not movie:
-        return []
-
-    original_language = movie.get(
-        "original_language",
-        ""
-    )
-
-    data = tmdb_get(
-        f"/movie/{movie_id}/similar",
         {
             "language": "en-US",
             "page": 1
         }
     )
 
-    if not data:
-        return []
-
-    movies = data.get(
+    reviews = data.get(
         "results",
         []
+    ) or []
+
+    if reviews:
+        return reviews
+
+    # Fallback request
+    fallback = _request(
+        f"/movie/{movie_id}/reviews",
+        {
+            "page": 1
+        }
     )
 
-    same_language = []
-
-    for item in movies:
-
-        if item.get(
-            "original_language"
-        ) == original_language:
-
-            same_language.append(item)
-
-    return same_language[:10]
+    return fallback.get(
+        "results",
+        []
+    ) or []
 
 
-# ============================================================
-# DISCOVER LANGUAGE MOVIES
-# ============================================================
+# =========================================================
+# RECOMMENDED MOVIES
+# =========================================================
 
-def discover_language_movies(
-    language_code,
-    sort_by="popularity.desc",
-    min_date=None,
-    max_date=None,
-    pages=3
-):
+def get_similar_movies(movie_id):
+    """
+    Get intelligent TMDB recommendations.
 
-    all_movies = []
+    Priority:
 
-    for page in range(1, pages + 1):
+    1. TMDB recommendations
+    2. Same-language recommendations
+    3. Similar movies fallback
+    """
 
-        params = {
+    if not movie_id:
+        return []
 
+    # -----------------------------------------------------
+    # Get selected movie language
+    # -----------------------------------------------------
+
+    movie_details = get_movie_details(movie_id)
+
+    selected_language = movie_details.get(
+        "original_language"
+    )
+
+    # -----------------------------------------------------
+    # TMDB Recommendations
+    # -----------------------------------------------------
+
+    recommendation_data = _request(
+        f"/movie/{movie_id}/recommendations",
+        {
             "language": "en-US",
-
-            "sort_by": sort_by,
-
-            "with_original_language":
-                language_code,
-
-            "page": page,
-
-            "include_adult": False,
-
-            "vote_count.gte": 1
+            "page": 1
         }
+    )
 
-        if min_date:
-
-            params[
-                "primary_release_date.gte"
-            ] = min_date
-
-        if max_date:
-
-            params[
-                "primary_release_date.lte"
-            ] = max_date
-
-        data = tmdb_get(
-            "/discover/movie",
-            params
-        )
-
-        if not data:
-            continue
-
-        results = data.get(
+    recommendations = _clean_movies(
+        recommendation_data.get(
             "results",
             []
         )
-
-        for movie in results:
-
-            # Extra language safety check
-            if movie.get(
-                "original_language"
-            ) == language_code:
-
-                if movie not in all_movies:
-
-                    all_movies.append(movie)
-
-    return all_movies
-
-
-# ============================================================
-# LATEST LANGUAGE MOVIES
-# ============================================================
-
-def get_latest_movies(language_code):
-
-    today = date.today()
-
-    # --------------------------------------------------------
-    # TRY 1: Last 6 months
-    # --------------------------------------------------------
-
-    start_date = (
-        today - timedelta(days=180)
-    ).isoformat()
-
-    movies = discover_language_movies(
-
-        language_code,
-
-        sort_by="primary_release_date.desc",
-
-        min_date=start_date,
-
-        max_date=today.isoformat(),
-
-        pages=3
     )
 
-    if len(movies) >= 5:
+    # -----------------------------------------------------
+    # Prefer same-language movies
+    # -----------------------------------------------------
 
-        return movies[:10]
+    if selected_language:
 
+        same_language = _filter_language(
+            recommendations,
+            selected_language
+        )
 
-    # --------------------------------------------------------
-    # TRY 2: Last 1 year
-    # --------------------------------------------------------
+        if same_language:
 
-    start_date = (
-        today - timedelta(days=365)
-    ).isoformat()
+            recommendations = same_language
 
-    movies = discover_language_movies(
+    # -----------------------------------------------------
+    # Similar Movies Fallback
+    # -----------------------------------------------------
 
-        language_code,
+    if len(recommendations) < 5:
 
-        sort_by="primary_release_date.desc",
-
-        min_date=start_date,
-
-        max_date=today.isoformat(),
-
-        pages=4
-    )
-
-    if len(movies) >= 5:
-
-        return movies[:10]
-
-
-    # --------------------------------------------------------
-    # TRY 3: Last 2 years
-    # --------------------------------------------------------
-
-    start_date = (
-        today - timedelta(days=730)
-    ).isoformat()
-
-    movies = discover_language_movies(
-
-        language_code,
-
-        sort_by="primary_release_date.desc",
-
-        min_date=start_date,
-
-        max_date=today.isoformat(),
-
-        pages=5
-    )
-
-    if movies:
-
-        return movies[:10]
-
-
-    # --------------------------------------------------------
-    # FINAL FALLBACK
-    # --------------------------------------------------------
-
-    movies = discover_language_movies(
-
-        language_code,
-
-        sort_by="popularity.desc",
-
-        pages=5
-    )
-
-    return movies[:10]
-
-
-# ============================================================
-# POPULAR LANGUAGE MOVIES
-# ============================================================
-
-def get_popular_movies(language_code):
-
-    movies = discover_language_movies(
-
-        language_code,
-
-        sort_by="popularity.desc",
-
-        pages=5
-    )
-
-    return movies[:10]
-
-
-# ============================================================
-# TRENDING LANGUAGE MOVIES
-# ============================================================
-
-def get_trending_movies(language_code):
-
-    # --------------------------------------------------------
-    # FIRST: TMDB GLOBAL TRENDING
-    # --------------------------------------------------------
-
-    all_trending = []
-
-    for page in range(1, 4):
-
-        data = tmdb_get(
-            "/trending/movie/week",
+        similar_data = _request(
+            f"/movie/{movie_id}/similar",
             {
                 "language": "en-US",
+                "page": 1
+            }
+        )
+
+        similar_movies = _clean_movies(
+            similar_data.get(
+                "results",
+                []
+            )
+        )
+
+        if selected_language:
+
+            same_language_similar = _filter_language(
+                similar_movies,
+                selected_language
+            )
+
+            if same_language_similar:
+
+                similar_movies = same_language_similar
+
+        existing_ids = {
+            movie.get("id")
+            for movie in recommendations
+        }
+
+        for movie in similar_movies:
+
+            movie_id_value = movie.get("id")
+
+            if movie_id_value not in existing_ids:
+
+                recommendations.append(movie)
+
+                existing_ids.add(
+                    movie_id_value
+                )
+
+    recommendations = _clean_movies(
+        recommendations
+    )
+
+    return recommendations[:10]
+
+
+# =========================================================
+# DISCOVER MOVIES BY LANGUAGE
+# =========================================================
+
+def _discover_movies(
+    language_code,
+    sort_by="popularity.desc",
+    extra_params=None
+):
+    """
+    Use TMDB Discover.
+
+    This gives much better language-specific results than
+    using the general popular endpoint.
+    """
+
+    if not language_code:
+        return []
+
+    params = {
+
+        "language": "en-US",
+
+        "with_original_language": language_code,
+
+        "sort_by": sort_by,
+
+        "include_adult": False,
+
+        "include_video": False,
+
+        "page": 1
+    }
+
+    if extra_params:
+
+        params.update(
+            extra_params
+        )
+
+    data = _request(
+        "/discover/movie",
+        params
+    )
+
+    return _clean_movies(
+        data.get(
+            "results",
+            []
+        )
+    )
+
+
+# =========================================================
+# LATEST MOVIES
+# =========================================================
+
+def get_latest_movies(language_code):
+    """
+    Get the latest released movies for the selected language.
+
+    Uses multiple TMDB Discover pages and sorts the results
+    locally by release date so the section does not become
+    empty because of overly strict TMDB filters.
+    """
+
+    if not language_code:
+        return []
+
+    today = date.today().isoformat()
+
+    all_movies = []
+
+    # Fetch several pages to get a larger pool of movies.
+    for page in range(1, 4):
+
+        data = _request(
+            "/discover/movie",
+            {
+                "language": "en-US",
+                "with_original_language": language_code,
+                "include_adult": False,
+                "include_video": False,
+                "sort_by": "primary_release_date.desc",
                 "page": page
             }
         )
 
-        if not data:
-            continue
-
-        results = data.get(
+        movies = data.get(
             "results",
             []
+        ) or []
+
+        all_movies.extend(movies)
+
+    # Remove duplicates.
+    all_movies = _clean_movies(all_movies)
+
+    # Keep only movies having a valid release date.
+    valid_movies = []
+
+    for movie in all_movies:
+
+        release_date = movie.get(
+            "release_date"
         )
 
-        for movie in results:
+        if not release_date:
+            continue
 
-            if movie.get(
-                "original_language"
-            ) == language_code:
+        # Ignore future releases.
+        if release_date > today:
+            continue
 
-                if movie not in all_trending:
+        # Make sure the movie really belongs
+        # to the selected language.
+        if movie.get(
+            "original_language"
+        ) != language_code:
+            continue
 
-                    all_trending.append(movie)
+        valid_movies.append(movie)
 
-    if len(all_trending) >= 5:
+    # Sort newest first.
+    valid_movies.sort(
+        key=lambda movie: movie.get(
+            "release_date",
+            ""
+        ),
+        reverse=True
+    )
 
-        return all_trending[:10]
+    return valid_movies[:6]
+def get_popular_movies(language_code):
+    """
+    Get established popular movies
+    for the selected language.
+    """
 
-
-    # --------------------------------------------------------
-    # FALLBACK 1: POPULAR + RECENT
-    # --------------------------------------------------------
-
-    recent_start = (
-        date.today() -
-        timedelta(days=365)
-    ).isoformat()
-
-    recent_movies = discover_language_movies(
+    movies = _discover_movies(
 
         language_code,
 
         sort_by="popularity.desc",
 
-        min_date=recent_start,
+        extra_params={
 
-        max_date=date.today().isoformat(),
-
-        pages=5
+            "vote_count.gte": 20
+        }
     )
 
-    if recent_movies:
-
-        return recent_movies[:10]
+    return movies[:12]
 
 
-    # --------------------------------------------------------
-    # FALLBACK 2: ALL POPULAR LANGUAGE MOVIES
-    # --------------------------------------------------------
+# =========================================================
+# TRENDING MOVIES
+# =========================================================
 
-    popular_movies = discover_language_movies(
+def get_trending_movies(language_code):
+    """
+    Get currently trending movies.
 
-        language_code,
+    TMDB's trending endpoint cannot directly filter by
+    original language, so we fetch trending movies and
+    filter them locally.
 
-        sort_by="popularity.desc",
+    If there are not enough movies, language-specific
+    popular movies are used as a fallback.
+    """
 
-        pages=5
+    if not language_code:
+        return []
+
+    trending_data = _request(
+        "/trending/movie/week",
+        {
+            "language": "en-US"
+        }
     )
 
-    return popular_movies[:10]
+    trending_movies = trending_data.get(
+        "results",
+        []
+    ) or []
 
+    # Filter selected language
+    trending_movies = _filter_language(
+        trending_movies,
+        language_code
+    )
 
-# ============================================================
-# TEST
-# ============================================================
+    trending_movies = _clean_movies(
+        trending_movies
+    )
 
-if __name__ == "__main__":
+    # -----------------------------------------------------
+    # Fallback if there are not enough trending movies
+    # -----------------------------------------------------
 
-    print()
-    print("======================================")
-    print("       TMDB LANGUAGE TEST")
-    print("======================================")
+    if len(trending_movies) < 6:
 
-    languages = {
+        fallback = _discover_movies(
 
-        "Telugu": "te",
+            language_code,
 
-        "Tamil": "ta",
+            sort_by="popularity.desc",
 
-        "Kannada": "kn",
-
-        "Malayalam": "ml",
-
-        "Hindi": "hi",
-
-        "English": "en"
-    }
-
-    for name, code in languages.items():
-
-        print()
-        print(
-            f"Testing {name}..."
+            extra_params={
+                "vote_count.gte": 5
+            }
         )
 
-        latest = get_latest_movies(code)
+        existing_ids = {
+            movie.get("id")
+            for movie in trending_movies
+        }
 
-        popular = get_popular_movies(code)
+        for movie in fallback:
 
-        trending = get_trending_movies(code)
-
-        print(
-            "Latest:",
-            len(latest)
-        )
-
-        print(
-            "Popular:",
-            len(popular)
-        )
-
-        print(
-            "Trending:",
-            len(trending)
-        )
-
-        if popular:
-
-            print(
-                "Example:",
-                popular[0].get("title")
+            movie_id_value = movie.get(
+                "id"
             )
 
-    print()
-    print("======================================")
-    print("              DONE")
-    print("======================================")
+            if movie_id_value not in existing_ids:
+
+                trending_movies.append(
+                    movie
+                )
+
+                existing_ids.add(
+                    movie_id_value
+                )
+
+    return trending_movies[:12]
+
+
+# =========================================================
+# POSTER URL HELPER
+# =========================================================
+
+def get_poster_url(poster_path):
+    """
+    Convert TMDB poster_path into a complete image URL.
+    """
+
+    if not poster_path:
+        return None
+
+    return (
+        f"{IMAGE_BASE_URL}"
+        f"{poster_path}"
+    )
